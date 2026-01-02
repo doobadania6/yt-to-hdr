@@ -38,29 +38,42 @@ def apply_hdr_style(image_bytes):
         return image_bytes
 
 def get_stream_data(v_id):
-    """Dynamicznie szuka działającego serwera proxy i pobiera link do MP4."""
-    search_list = INSTANCES
+    """Pobiera link do wideo, dynamicznie rotując między 20 najlepszymi serwerami."""
+    search_list = []
+    
+    # 1. Pobierz listę wszystkich działających instancji z API Invidious
     try:
-        # Próba pobrania aktualnej listy 'zdrowych' serwerów
-        api_res = requests.get("https://api.invidious.io/instances?sort_by=type,health", timeout=5)
+        # Sortujemy po kondycji (health) i wybieramy tylko te z HTTPS
+        api_res = requests.get("https://api.invidious.io/instances?sort_by=health", timeout=5)
         if api_res.status_code == 200:
             data = api_res.json()
-            dynamic = [f"https://{i[0]}" for i in data if i[1].get('type') == 'https' and i[1].get('health', 0) > 90]
-            search_list = list(dict.fromkeys(dynamic + INSTANCES))
-    except:
-        pass
+            # Wybieramy tylko te, które mają health > 90 i obsługują API v1
+            search_list = [
+                f"https://{i[0]}" for i in data 
+                if i[1].get('type') == 'https' and i[1].get('health', 0) > 90
+            ]
+    except Exception as e:
+        print(f"Błąd API listy: {e}")
 
-    for base_url in search_list[:12]:
+    # Dodaj zapasowe serwery na koniec listy, jeśli API by zawiodło
+    search_list.extend(INSTANCES)
+    search_list = list(dict.fromkeys(search_list)) # Usuń duplikaty
+
+    # 2. Sprawdź pierwsze 20 serwerów z listy
+    for base_url in search_list[:20]:
         try:
-            r = requests.get(f"{base_url}/api/v1/videos/{v_id}?region=PL", timeout=4)
+            # Ustawiamy krótki timeout, żeby nie czekać na martwe serwery
+            r = requests.get(f"{base_url}/api/v1/videos/{v_id}?region=PL", timeout=3)
             if r.status_code == 200:
                 video_info = r.json()
-                # Szukamy bezpośredniego streamu MP4
+                # Szukamy streamu MP4
                 streams = [s for s in video_info.get('formatStreams', []) if 'video/mp4' in s.get('type', '')]
                 if streams:
+                    print(f"Sukces! Używam instancji: {base_url}")
                     return streams[0]['url'], video_info.get('lengthSeconds', 0)
         except:
             continue
+            
     return None, None
 
 @app.route('/')
