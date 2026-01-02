@@ -4,36 +4,28 @@ import numpy as np
 import yt_dlp
 import zipfile
 from io import BytesIO
-from flask import Flask, render_template_string, request, send_file, jsonify
+from flask import Flask, render_template_string, request, Response, stream_with_context
 
 app = Flask(__name__)
 
-def get_sharpness(img):
-    """Oblicza ostrość obrazu za pomocą wariancji Laplasjanu."""
-    return cv2.Laplacian(img, cv2.CV_64F).var()
-
 def apply_hdr_effect(image):
-    """Zoptymalizowany filtr HDR/Foto."""
-    # Resize do 720p jeśli klatka jest większa (oszczędność RAM na Renderze)
+    # Zmniejszamy klatkę do 720p dla stabilności RAM
     h, w = image.shape[:2]
     if h > 720:
-        ratio = 720.0 / h
-        image = cv2.resize(image, (int(w * ratio), 720))
+        image = cv2.resize(image, (int(w * (720/h)), 720))
 
-    # Korekcja lokalna kontrastu
+    # HDR - CLAHE
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8,8))
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     l = clahe.apply(l)
-    enhanced_img = cv2.cvtColor(cv2.merge((l,a,b)), cv2.COLOR_LAB2BGR)
+    img = cv2.cvtColor(cv2.merge((l,a,b)), cv2.COLOR_LAB2BGR)
     
-    # Wyostrzanie (Subtelne)
-    gaussian = cv2.GaussianBlur(enhanced_img, (0, 0), 1.5)
-    unsharp = cv2.addWeighted(enhanced_img, 1.4, gaussian, -0.4, 0)
-    
-    # Podbicie kolorów
-    hsv = cv2.cvtColor(unsharp, cv2.COLOR_BGR2HSV).astype("float32")
-    hsv[:, :, 1] *= 1.25 
+    # Wyostrzanie i nasycenie
+    gaussian = cv2.GaussianBlur(img, (0, 0), 1.0)
+    img = cv2.addWeighted(img, 1.4, gaussian, -0.4, 0)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype("float32")
+    hsv[:, :, 1] *= 1.3
     hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
     return cv2.cvtColor(hsv.astype("uint8"), cv2.COLOR_HSV2BGR)
 
@@ -42,36 +34,28 @@ HTML_TEMPLATE = '''
 <html lang="pl">
 <head>
     <meta charset="UTF-8">
-    <title>YT do Foto HDR v2</title>
+    <title>YT HDR Frames v3</title>
     <style>
-        body { font-family: -apple-system, sans-serif; background: #0f0f0f; color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .card { background: #1a1a1a; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); width: 100%; max-width: 450px; text-align: center; }
-        h1 { color: #ff0000; font-size: 24px; margin-bottom: 10px; }
-        input { width: 100%; padding: 15px; border-radius: 10px; border: 1px solid #333; background: #000; color: white; margin: 20px 0; box-sizing: border-box; }
-        button { background: #ff0000; color: white; border: none; padding: 15px 30px; border-radius: 10px; cursor: pointer; font-weight: bold; width: 100%; font-size: 16px; }
-        button:disabled { background: #444; }
-        #log { margin-top: 20px; font-size: 12px; color: #aaa; text-align: left; max-height: 100px; overflow-y: auto; }
+        body { font-family: sans-serif; background: #000; color: white; text-align: center; padding-top: 100px; }
+        .box { background: #111; padding: 30px; border-radius: 20px; display: inline-block; border: 1px solid #333; }
+        input { padding: 12px; width: 300px; border-radius: 5px; border: none; }
+        button { padding: 12px 25px; background: #ff0000; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        #status { margin-top: 20px; color: #aaa; font-size: 14px; }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h1>YT Smart Frames</h1>
-        <p>30 ostrych kadrów z obróbką HDR</p>
+    <div class="box">
+        <h1>YT to HDR Photo</h1>
         <input type="text" id="url" placeholder="Wklej link YouTube...">
-        <button id="btn" onclick="process()">GENERUJ ZDJĘCIA</button>
-        <div id="log"></div>
+        <button onclick="download()">POBIERZ ZIP</button>
+        <div id="status"></div>
     </div>
     <script>
-        function process() {
+        function download() {
             const url = document.getElementById('url').value;
-            if(!url) return alert("Wklej link!");
-            document.getElementById('btn').disabled = true;
-            document.getElementById('log').innerHTML = "Łączenie z YT... Proces może zająć 1-2 minuty.";
-            window.location.href = "/generate?url=" + encodeURIComponent(url);
-            setTimeout(() => {
-                document.getElementById('btn').disabled = false;
-                document.getElementById('log').innerHTML = "Pobieranie powinno się rozpocząć.";
-            }, 5000);
+            if(!url) return;
+            document.getElementById('status').innerText = "Trwa generowanie... Paczka ZIP zacznie się pobierać automatycznie.";
+            window.location.href = "/stream_zip?url=" + encodeURIComponent(url);
         }
     </script>
 </body>
@@ -79,57 +63,46 @@ HTML_TEMPLATE = '''
 '''
 
 @app.route('/')
-def home():
+def index():
     return render_template_string(HTML_TEMPLATE)
 
-@app.route('/generate')
-def generate():
+@app.route('/stream_zip')
+def stream_zip():
     video_url_raw = request.args.get('url')
-    count = 30
     
-    # Pobieramy tylko stream 720p dla stabilności na darmowym serwerze
-    ydl_opts = {'format': 'bestvideo[height<=720][ext=mp4]', 'quiet': True}
-    
-    try:
+    def generate():
+        # Ustawienia yt-dlp
+        ydl_opts = {'format': 'bestvideo[height<=720][ext=mp4]', 'quiet': True}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url_raw, download=False)
-            video_stream_url = info['url']
+            stream_url = info['url']
         
-        cap = cv2.VideoCapture(video_stream_url)
+        cap = cv2.VideoCapture(stream_url)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames <= 0: raise ValueError("Błąd strumienia")
+        step = total_frames // 31
         
-        step = total_frames // (count + 1)
-        zip_buffer = BytesIO()
-        
-        with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED) as zip_file:
-            for i in range(count):
-                target_pos = (i + 1) * step
-                
-                # Inteligentna selekcja: sprawdź 3 klatki i wybierz najostrzejszą
-                best_frame = None
-                max_sharpness = -1
-                
-                for offset in [0, 5, 10]: # Sprawdzamy klatkę bazową i dwie kolejne
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, target_pos + offset)
-                    ret, frame = cap.read()
-                    if ret:
-                        sharpness = get_sharpness(frame)
-                        if sharpness > max_sharpness:
-                            max_sharpness = sharpness
-                            best_frame = frame
-                
-                if best_frame is not None:
-                    processed = apply_hdr_effect(best_frame)
+        # Inicjalizacja strumienia ZIP
+        queue = BytesIO()
+        with zipfile.ZipFile(queue, mode='w', compression=zipfile.ZIP_STORED) as zf:
+            for i in range(30):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, (i + 1) * step)
+                ret, frame = cap.read()
+                if ret:
+                    processed = apply_hdr_effect(frame)
                     _, buffer = cv2.imencode(".jpg", processed, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    zip_file.writestr(f"foto_{i+1}.jpg", buffer.tobytes())
-        
+                    
+                    # Tworzymy nagłówek pliku w ZIP
+                    zf.writestr(f"foto_{i+1}.jpg", buffer.tobytes())
+                    
+                    # Wypychamy to, co aktualnie mamy w buforze do użytkownika
+                    data = queue.getvalue()
+                    yield data
+                    queue.truncate(0)
+                    queue.seek(0)
         cap.release()
-        zip_buffer.seek(0)
-        return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='yt_hdr_frames.zip')
-    
-    except Exception as e:
-        return f"Błąd: {str(e)}", 500
+
+    return Response(stream_with_context(generate()), mimetype='application/zip', 
+                    headers={"Content-Disposition": "attachment; filename=frames_hdr.zip"})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
