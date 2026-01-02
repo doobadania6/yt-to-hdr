@@ -9,17 +9,19 @@ from flask import Flask, render_template_string, request, send_file
 
 app = Flask(__name__)
 
-# Lista publicznych instancji Invidious (jeśli jedna nie działa, sprawdzamy kolejną)
-INVIDIOUS_INSTANCES = [
-    "https://invidious.snopyta.org",
-    "https://yewtu.be",
-    "https://invidious.kavin.rocks",
-    "https://vid.puffyan.us"
+# Lista "zdrowych" serwerów proxy, które pobiorą dane za nas
+INSTANCES = [
+    "https://inv.tux.pizza",
+    "https://invidious.electrolama.it",
+    "https://invidious.drgns.space",
+    "https://vid.puffyan.us",
+    "https://yewtu.be"
 ]
 
-def apply_hdr_effect(image_bytes):
+def apply_hdr_style(image_bytes):
     try:
         img = Image.open(BytesIO(image_bytes))
+        # Podbicie detali i kolorów dla efektu "zdjęcia"
         img = ImageEnhance.Contrast(img).enhance(1.5)
         img = img.filter(ImageFilter.SHARPEN)
         img = ImageEnhance.Color(img).enhance(1.4)
@@ -29,72 +31,71 @@ def apply_hdr_effect(image_bytes):
     except:
         return image_bytes
 
-def get_video_data(video_id):
-    """Pobiera bezpośredni link do wideo przez Invidious API."""
-    for instance in INVIDIOUS_INSTANCES:
+def get_stream_url(v_id):
+    """Pobiera link do streamu przez API Invidious."""
+    for url in INSTANCES:
         try:
-            res = requests.get(f"{instance}/api/v1/videos/{video_id}", timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                # Szukamy formatu MP4, najlepiej 720p
-                formats = [f for f in data['formatStreams'] if f['container'] == 'mp4']
-                if formats:
-                    return formats[0]['url'], data['lengthSeconds']
+            r = requests.get(f"{url}/api/v1/videos/{v_id}", timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                # Szukamy najwyższej dostępnej jakości w formacie mp4
+                streams = [s for s in data.get('formatStreams', []) if 'video/mp4' in s.get('type', '')]
+                if streams:
+                    return streams[0]['url'], data.get('lengthSeconds', 0)
         except:
             continue
     return None, None
 
 @app.route('/')
-def index():
-    return '''
-    <body style="background:#000;color:white;text-align:center;padding-top:100px;font-family:sans-serif;">
-        <div style="border:1px solid red; display:inline-block; padding:30px; border-radius:15px;">
-            <h1>YT to Photo HDR (Proxy Mode)</h1>
-            <input type="text" id="url" placeholder="Link YouTube" style="padding:10px;width:300px;">
-            <button onclick="go()" style="padding:10px;background:red;color:white;border:none;cursor:pointer;">POBIERZ ZIP</button>
-            <p id="st"></p>
+def home():
+    return render_template_string('''
+    <body style="background:#000;color:white;text-align:center;padding:100px;font-family:sans-serif;">
+        <div style="border:1px solid #ff0000; display:inline-block; padding:40px; border-radius:20px;">
+            <h1>YT to HDR Photo <span style="font-size:12px;color:red;">v6 PROXY</span></h1>
+            <input type="text" id="url" placeholder="Link do YouTube" style="padding:15px;width:350px;border-radius:10px;border:none;">
+            <button onclick="go()" style="padding:15px;background:red;color:white;border:none;border-radius:10px;cursor:pointer;font-weight:bold;">GENERUJ ZIP</button>
+            <p id="msg" style="color:#666;margin-top:20px;"></p>
         </div>
         <script>
             function go() {
-                const url = document.getElementById('url').value;
-                document.getElementById('st').innerText = "Praca przez Proxy... Czekaj ok. 60s.";
-                window.location.href = "/generate?url=" + encodeURIComponent(url);
+                const u = document.getElementById('url').value;
+                if(!u) return;
+                document.getElementById('msg').innerText = "Łączenie przez tunel proxy... To potrwa około minuty.";
+                window.location.href = "/generate?url=" + encodeURIComponent(u);
             }
         </script>
     </body>
-    '''
+    ''')
 
 @app.route('/generate')
 def generate():
-    url = request.args.get('url')
-    # Wyciąganie ID filmu z linku
-    video_id_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
-    if not video_id_match:
-        return "Niepoprawny link", 400
+    video_url = request.args.get('url')
+    # Wyciąganie ID filmu
+    v_id = None
+    matches = [r"v=([a-zA-Z0-9_-]{11})", r"be/([a-zA-Z0-9_-]{11})", r"embed/([a-zA-Z0-9_-]{11})"]
+    for p in matches:
+        res = re.search(p, video_url)
+        if res: v_id = res.group(1); break
     
-    video_id = video_id_match.group(1)
-    stream_url, duration = get_video_data(video_id)
-    
-    if not stream_url:
-        return "Błąd: Wszystkie serwery proxy są zajęte. Spróbuj za chwilę.", 503
+    if not v_id: return "Błędny link YouTube", 400
 
-    try:
-        zip_mem = BytesIO()
-        with zipfile.ZipFile(zip_mem, 'w') as zf:
-            num = 15
-            step = duration // (num + 1)
-            for i in range(1, num + 1):
-                ts = i * step
-                # FFmpeg pobiera klatkę przez link z proxy
-                cmd = ['ffmpeg', '-ss', str(ts), '-i', stream_url, '-frames:v', '1', '-f', 'image2', '-vcodec', 'mjpeg', 'pipe:1']
-                p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
-                if p.stdout:
-                    zf.writestr(f"foto_{i:02d}.jpg", apply_hdr_effect(p.stdout))
-        
-        zip_mem.seek(0)
-        return send_file(zip_mem, mimetype='application/zip', as_attachment=True, download_name='kadry_hdr_proxy.zip')
-    except Exception as e:
-        return f"Błąd przetwarzania: {str(e)}", 500
+    stream_url, duration = get_stream_url(v_id)
+    if not stream_url: return "Błąd: Serwery YouTube są obecnie przeciążone. Spróbuj za chwilę.", 503
+
+    zip_mem = BytesIO()
+    with zipfile.ZipFile(zip_mem, 'w') as zf:
+        num = 15
+        step = duration // (num + 1)
+        for i in range(1, num + 1):
+            ts = i * step
+            # FFmpeg wycina klatkę bezpośrednio z URL podanego przez proxy
+            cmd = ['ffmpeg', '-ss', str(ts), '-i', stream_url, '-frames:v', '1', '-f', 'image2', '-vcodec', 'mjpeg', 'pipe:1']
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+            if p.stdout:
+                zf.writestr(f"foto_{i:02d}.jpg", apply_hdr_style(p.stdout))
+    
+    zip_mem.seek(0)
+    return send_file(zip_mem, mimetype='application/zip', as_attachment=True, download_name='kadry_hdr.zip')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
