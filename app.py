@@ -100,5 +100,8 @@ def generate():
         # Jeśli nadal błąd, spróbujemy wyjaśnić użytkownikowi co się dzieje
         return f"Błąd (YouTube zablokował IP serwera): {str(e)}", 403
 
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+
+'proxy': 'http://twoje-darmowe-proxy.com:8080',
