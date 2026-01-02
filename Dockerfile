@@ -4,5 +4,4 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-# Plik cookies.txt zostanie skopiowany razem z resztą plików
 CMD gunicorn --bind 0.0.0.0:$PORT --timeout 150 app:app
