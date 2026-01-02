@@ -1,18 +1,16 @@
-# Używamy lekkiego obrazu Pythona
 FROM python:3.10-slim
 
-# Instalujemy FFmpeg wewnątrz kontenera
+# Instalacja FFmpeg - kluczowe do wycinania klatek
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# Ustawiamy folder roboczy
 WORKDIR /app
 
-# Kopiujemy wymagania i instalujemy je
+# Instalacja bibliotek Pythona
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Kopiujemy kod aplikacji
+# Kopiowanie reszty plików
 COPY . .
 
-# Uruchamiamy aplikację za pomocą gunicorn (stabilniejszy niż wbudowany serwer Flask)
-CMD gunicorn --bind 0.0.0.0:$PORT app:app
+# Uruchomienie aplikacji przez profesjonalny serwer Gunicorn
+CMD gunicorn --bind 0.0.0.0:$PORT --timeout 120 app:app
