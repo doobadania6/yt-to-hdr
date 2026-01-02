@@ -34,14 +34,33 @@ def apply_hdr_style(image_bytes):
         return image_bytes
 
 def get_stream_data(v_id):
-    """Pobiera link do pliku wideo przez API Invidious."""
-    for base_url in INSTANCES:
+    """Pobiera link do pliku wideo, dynamicznie szukając działającej instancji."""
+    
+    # 1. Najpierw pobieramy listę aktualnie działających instancji z API Invidious
+    try:
+        api_res = requests.get("https://api.invidious.io/instances?sort_by=type,health", timeout=5)
+        if api_res.status_code == 200:
+            instances_data = api_res.json()
+            # Wybieramy tylko instancje typu 'https' i z dobrą kondycją (health)
+            dynamic_instances = [
+                f"https://{item[0]}" for item in instances_data 
+                if item[1].get('type') == 'https' and item[1].get('health', 0) > 90
+            ]
+            # Łączymy z naszą bazową listą i usuwamy duplikaty
+            search_list = list(dict.fromkeys(dynamic_instances + INSTANCES))
+        else:
+            search_list = INSTANCES
+    except:
+        search_list = INSTANCES
+
+    # 2. Iterujemy po liście aż znajdziemy taką, która poda nam link do MP4
+    for base_url in search_list[:15]: # Sprawdzamy max 15 najlepszych serwerów
         try:
-            # Zapytanie do API o dane o filmie
-            r = requests.get(f"{base_url}/api/v1/videos/{v_id}", timeout=5)
+            # Ważne: dodajemy parametr ?region=PL, aby uniknąć blokad regionalnych
+            r = requests.get(f"{base_url}/api/v1/videos/{v_id}?region=PL", timeout=4)
             if r.status_code == 200:
                 data = r.json()
-                # Szukamy streamu mp4 (najlepiej 720p)
+                # Szukamy streamu mp4
                 streams = [s for s in data.get('formatStreams', []) if 'video/mp4' in s.get('type', '')]
                 if streams:
                     return streams[0]['url'], data.get('lengthSeconds', 0)
