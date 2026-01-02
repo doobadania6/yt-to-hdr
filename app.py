@@ -9,7 +9,7 @@ from flask import Flask, render_template_string, request, send_file
 
 app = Flask(__name__)
 
-# Lista stabilnych instancji Invidious, które pobiorą dane za nas
+# Baza zapasowych instancji Invidious
 INSTANCES = [
     "https://inv.tux.pizza",
     "https://invidious.electrolama.it",
@@ -19,12 +19,16 @@ INSTANCES = [
 ]
 
 def apply_hdr_style(image_bytes):
+    """Nakłada filtry poprawiające wygląd klatki (pseudo-HDR)."""
     try:
         img = Image.open(BytesIO(image_bytes))
-        # Filtry poprawiające jakość klatki wideo
+        # 1. Kontrast
         img = ImageEnhance.Contrast(img).enhance(1.5)
+        # 2. Jasność
         img = ImageEnhance.Brightness(img).enhance(1.1)
+        # 3. Wyostrzenie
         img = img.filter(ImageFilter.SHARPEN)
+        # 4. Kolory (Nasycenie)
         img = ImageEnhance.Color(img).enhance(1.4)
         
         out = BytesIO()
@@ -34,36 +38,27 @@ def apply_hdr_style(image_bytes):
         return image_bytes
 
 def get_stream_data(v_id):
-    """Pobiera link do pliku wideo, dynamicznie szukając działającej instancji."""
-    
-    # 1. Najpierw pobieramy listę aktualnie działających instancji z API Invidious
+    """Dynamicznie szuka działającego serwera proxy i pobiera link do MP4."""
+    search_list = INSTANCES
     try:
+        # Próba pobrania aktualnej listy 'zdrowych' serwerów
         api_res = requests.get("https://api.invidious.io/instances?sort_by=type,health", timeout=5)
         if api_res.status_code == 200:
-            instances_data = api_res.json()
-            # Wybieramy tylko instancje typu 'https' i z dobrą kondycją (health)
-            dynamic_instances = [
-                f"https://{item[0]}" for item in instances_data 
-                if item[1].get('type') == 'https' and item[1].get('health', 0) > 90
-            ]
-            # Łączymy z naszą bazową listą i usuwamy duplikaty
-            search_list = list(dict.fromkeys(dynamic_instances + INSTANCES))
-        else:
-            search_list = INSTANCES
+            data = api_res.json()
+            dynamic = [f"https://{i[0]}" for i in data if i[1].get('type') == 'https' and i[1].get('health', 0) > 90]
+            search_list = list(dict.fromkeys(dynamic + INSTANCES))
     except:
-        search_list = INSTANCES
+        pass
 
-    # 2. Iterujemy po liście aż znajdziemy taką, która poda nam link do MP4
-    for base_url in search_list[:15]: # Sprawdzamy max 15 najlepszych serwerów
+    for base_url in search_list[:12]:
         try:
-            # Ważne: dodajemy parametr ?region=PL, aby uniknąć blokad regionalnych
             r = requests.get(f"{base_url}/api/v1/videos/{v_id}?region=PL", timeout=4)
             if r.status_code == 200:
-                data = r.json()
-                # Szukamy streamu mp4
-                streams = [s for s in data.get('formatStreams', []) if 'video/mp4' in s.get('type', '')]
+                video_info = r.json()
+                # Szukamy bezpośredniego streamu MP4
+                streams = [s for s in video_info.get('formatStreams', []) if 'video/mp4' in s.get('type', '')]
                 if streams:
-                    return streams[0]['url'], data.get('lengthSeconds', 0)
+                    return streams[0]['url'], video_info.get('lengthSeconds', 0)
         except:
             continue
     return None, None
@@ -71,34 +66,50 @@ def get_stream_data(v_id):
 @app.route('/')
 def home():
     return render_template_string('''
-    <body style="background:#000;color:white;text-align:center;padding-top:100px;font-family:sans-serif;">
-        <div style="border:2px solid #ff0000; display:inline-block; padding:40px; border-radius:20px; background:#111;">
-            <h1 style="color:#ff0000;">YT to HDR Photo <span style="font-size:14px;">v6 BYPASS</span></h1>
-            <p style="color:#888;">Pobieranie klatek przez tunel Invidious (Omija blokady bota)</p>
-            <input type="text" id="url" placeholder="Wklej link YouTube..." style="padding:15px;width:350px;border-radius:10px;border:none;margin-bottom:10px;">
-            <br>
-            <button onclick="go()" id="btn" style="padding:15px 40px;background:#ff0000;color:white;border:none;border-radius:10px;cursor:pointer;font-weight:bold;">GENERUJ ZDJĘCIA</button>
-            <p id="msg" style="color:#ffcc00;margin-top:20px;"></p>
+    <!DOCTYPE html>
+    <html lang="pl">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>YT HDR Photo Bypass</title>
+        <style>
+            body { background: #000; color: white; text-align: center; font-family: sans-serif; padding: 50px 20px; }
+            .container { border: 2px solid #ff0000; display: inline-block; padding: 40px; border-radius: 20px; background: #111; max-width: 500px; }
+            h1 { color: #ff0000; margin-bottom: 5px; }
+            input { width: 100%; padding: 15px; border-radius: 10px; border: none; margin: 20px 0; box-sizing: border-box; font-size: 16px; }
+            button { width: 100%; padding: 15px; background: #ff0000; color: white; border: none; border-radius: 10px; cursor: pointer; font-weight: bold; font-size: 18px; }
+            button:disabled { background: #555; }
+            #status { color: #ffcc00; margin-top: 20px; min-height: 20px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>YouTube to Photo</h1>
+            <p style="color:#888;">Wersja v6: Tunelowanie Invidious</p>
+            <input type="text" id="url" placeholder="Wklej link do YouTube...">
+            <button onclick="go()" id="btn">GENERUJ PACZKĘ ZIP</button>
+            <div id="status"></div>
         </div>
         <script>
             function go() {
                 const u = document.getElementById('url').value;
                 if(!u) return alert("Wklej link!");
                 document.getElementById('btn').disabled = true;
-                document.getElementById('msg').innerText = "Inicjowanie tunelu proxy... To potrwa ok. 60-90 sekund.";
+                document.getElementById('status').innerText = "Szukanie wolnego tunelu i wycinanie klatek (60-120s)...";
                 window.location.href = "/generate?url=" + encodeURIComponent(u);
             }
         </script>
     </body>
+    </html>
     ''')
 
 @app.route('/generate')
 def generate():
     video_url = request.args.get('url')
     
-    # Wyciąganie ID filmu (obsługuje różne formaty linków)
+    # Wyciąganie ID filmu z różnych formatów linków
     v_id = None
-    patterns = [r"v=([a-zA-Z0-9_-]{11})", r"be/([a-zA-Z0-9_-]{11})", r"embed/([a-zA-Z0-9_-]{11})"]
+    patterns = [r"v=([a-zA-Z0-9_-]{11})", r"be/([a-zA-Z0-9_-]{11})", r"embed/([a-zA-Z0-9_-]{11})", r"shorts/([a-zA-Z0-9_-]{11})"]
     for p in patterns:
         res = re.search(p, video_url)
         if res:
@@ -106,38 +117,48 @@ def generate():
             break
     
     if not v_id:
-        return "Błędny link YouTube. Upewnij się, że wkleiłeś pełny adres.", 400
+        return "Błędny link YouTube!", 400
 
-    # Pobieranie linku przez Proxy
+    # Pobieranie URL do strumienia przez Proxy
     stream_url, duration = get_stream_data(v_id)
     if not stream_url:
-        return "Błąd: Wszystkie tunele proxy są zajęte. Spróbuj za 2 minuty.", 503
+        return "Błąd: Wszystkie proxy są zajęte. Spróbuj za chwilę.", 503
 
     try:
         zip_mem = BytesIO()
         with zipfile.ZipFile(zip_mem, 'w') as zf:
-            # 15 klatek rozłożonych w czasie
             count = 15
+            # Zabezpieczenie przed bardzo krótkimi filmami
+            if duration < count: count = duration if duration > 0 else 1
             interval = duration // (count + 1)
             
             for i in range(1, count + 1):
                 timestamp = i * interval
-                # FFmpeg pobiera klatkę prosto z URL dostarczonego przez Invidious
+                # FFmpeg - wysoka jakość, szybkie szukanie (-ss przed -i)
                 cmd = [
-                    'ffmpeg', '-ss', str(timestamp), '-i', stream_url,
-                    '-frames:v', '1', '-f', 'image2', '-vcodec', 'mjpeg', 'pipe:1'
+                    'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                    '-ss', str(timestamp), '-i', stream_url,
+                    '-frames:v', '1', '-q:v', '2', '-f', 'image2', '-vcodec', 'mjpeg', 'pipe:1'
                 ]
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
                 
                 if proc.stdout:
-                    processed = apply_hdr_style(proc.stdout)
-                    zf.writestr(f"kadr_{i:02d}.jpg", processed)
+                    # Nałożenie filtrów HDR i dodanie do ZIP
+                    final_img = apply_hdr_style(proc.stdout)
+                    zf.writestr(f"kadr_{i:02d}.jpg", final_img)
         
         zip_mem.seek(0)
-        return send_file(zip_mem, mimetype='application/zip', as_attachment=True, download_name='kadry_hdr_proxy.zip')
+        return send_file(
+            zip_mem, 
+            mimetype='application/zip', 
+            as_attachment=True, 
+            download_name=f'HDR_Frames_{v_id}.zip'
+        )
     
     except Exception as e:
-        return f"Wystąpił błąd podczas generowania: {str(e)}", 500
+        return f"Błąd krytyczny: {str(e)}", 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+    # Render przypisuje port dynamicznie
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
